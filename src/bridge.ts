@@ -28,7 +28,12 @@ export function stableEntryId(sessionId: string, sourceId: string, kind: string)
 }
 
 export function messageEntryId(sessionId: string, message: unknown): string {
-  return stableEntryId(sessionId, canonical(message), "live-message");
+  if (!isObject(message)) return stableEntryId(sessionId, canonical(message), "live-message");
+  const identity: Dict = {};
+  for (const key of ["role", "api", "provider", "model", "responseModel", "responseId", "content", "usage", "stopReason", "errorMessage", "toolCallId", "toolName", "isError", "timestamp"]) {
+    if (message[key] !== undefined) identity[key] = message[key];
+  }
+  return stableEntryId(sessionId, canonical(identity), "live-message");
 }
 
 export function normalizePiApiKey(value: unknown): string | undefined {

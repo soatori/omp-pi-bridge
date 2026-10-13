@@ -78,7 +78,7 @@ test("OMP startup registers Pi providers and dialogue events mirror once into a 
   await handlers.get("message_end")?.({ message: answer }, ctx);
   entries.push(
     { type: "message", id: "omp-user", timestamp: "2026-10-14T00:00:00.100Z", message: userMessage },
-    { type: "message", id: "omp-answer", timestamp: "2026-10-14T00:00:01.000Z", message: answer },
+    { type: "message", id: "omp-answer", timestamp: "2026-10-14T00:00:01.000Z", message: { ...answer, contextSnapshot: { tools: ["bash"] }, duration: 900, ttft: 150, completedAt: 1791936001200, errorId: "diag-test" } },
     { type: "model_usage", id: "omp-helper", timestamp: "2026-10-14T00:00:02.000Z", provider: "cc-switch-test", model: "test-model", usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 3, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } },
   );
   await handlers.get("turn_end")?.({}, ctx);

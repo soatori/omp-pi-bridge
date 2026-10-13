@@ -40,6 +40,15 @@ test("live conversation entries retain message content and usage", () => {
   expect(toPiLiveEntry({ type: "message", message: { role: "system", content: "private system prompt" } }, "session-1", null)).toBeNull();
 });
 
+test("message_end and persisted messages share an ID despite OMP bookkeeping metadata", () => {
+  const eventMessage = { role: "assistant", provider: "provider-a", model: "model-a", responseId: "response-1", timestamp: 1791936001000, content: [{ type: "text", text: "answer" }], usage: { input: 9, output: 5 } };
+  const persistedMessage = { ...eventMessage, contextSnapshot: { keys: ["tools"] }, duration: 1100, ttft: 200, completedAt: 1791936001100, errorId: "diagnostic-1" };
+  const fromEvent = toPiLiveEntry({ type: "message", message: eventMessage }, "session-1", null);
+  const fromSession = toPiLiveEntry({ type: "message", message: persistedMessage }, "session-1", null);
+
+  expect(fromEvent?.id).toBe(fromSession?.id);
+});
+
 test("historical usage backfill omits transcript text and converts model_usage", () => {
   const rows = toPiUsageEntries([
     { type: "message", id: "assistant-1", timestamp: "2026-10-14T00:00:01.000Z", message: { role: "assistant", provider: "provider-a", model: "model-a", content: [{ type: "text", text: "private transcript" }], usage: { input: 10, output: 4, cacheRead: 2, cacheWrite: 0, totalTokens: 16, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } } },

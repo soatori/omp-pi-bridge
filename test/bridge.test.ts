@@ -3,6 +3,7 @@ import {
   getPiSessionPath,
   mergeProviderModels,
   normalizePiApiKey,
+  ompSessionAgentDir,
   parseOmpSession,
   toPiLiveEntry,
   toPiUsageEntries,
@@ -71,4 +72,9 @@ test("Pi session files use project folders and honor an absolute custom sessionD
   const custom = getPiSessionPath({ piAgentDir: "C:\\Users\\cbsjz\\.pi\\agent", cwd: "C:\\work", sessionId: "session-2", timestamp: "2026-10-14T00:00:00.000Z", settings: { sessionDir: "D:\\PiSessions" } });
   expect(custom.root).toBe("D:\\PiSessions");
   expect(custom.flat).toBe(true);
+});
+
+test("only OMP project session directories are mapped to an agent state directory", () => {
+  expect(ompSessionAgentDir("C:\\Users\\cbsjz\\.omp\\agent\\sessions\\--C--work--")).toBe("C:\\Users\\cbsjz\\.omp\\agent");
+  expect(ompSessionAgentDir("E:\\Develop\\omp-pi-bridge")).toBeNull();
 });

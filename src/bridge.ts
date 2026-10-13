@@ -325,7 +325,10 @@ export function piProviderAgentDir(env: Dict = process.env, home = process.env.U
   return path.join(home, ".pi", "agent");
 }
 
-export function ompSessionAgentDir(sessionDir: string): string {
+export function ompSessionAgentDir(sessionDir: string): string | null {
   const api = pathApi(sessionDir);
-  return api.resolve(sessionDir, "..", "..");
+  const projectSessionDir = api.resolve(sessionDir);
+  const sessionsRoot = api.dirname(projectSessionDir);
+  if (api.basename(sessionsRoot).toLowerCase() !== "sessions") return null;
+  return api.dirname(sessionsRoot);
 }

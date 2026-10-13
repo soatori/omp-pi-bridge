@@ -29,6 +29,7 @@ type BridgeState = {
 };
 
 type PiProvider = { id: string; data: Dict };
+type SessionContext = { manager: any; sessionId: string; header: Dict; agentDir: string };
 
 const startupByAgentDir = new Map<string, Promise<void>>();
 const stateByAgentDir = new Map<string, BridgeState>();
@@ -40,6 +41,12 @@ function warnOnce(key: string, message: string): void {
   if (warned.has(key)) return;
   warned.add(key);
   console.warn(`[omp-pi-bridge] ${message}`);
+}
+
+function errorDetail(error: unknown): string {
+  if (!(error instanceof Error)) return "unknown error";
+  const code = (error as Error & { code?: string }).code;
+  return `${code ? `${code}: ` : ""}${error.message.slice(0, 240)}`;
 }
 
 function loadPiConfig(): { piAgentDir: string; providers: PiProvider[]; settings: Dict } {
@@ -280,8 +287,13 @@ async function reconcileAllSessions(agentDir: string, config: ReturnType<typeof 
   }
 }
 
-function contextData(ctx: any) {
+function contextData(ctx: any): SessionContext | null {
   const manager = ctx.sessionManager;
+  if (!manager || typeof manager.getSessionDir !== "function" || typeof manager.getSessionId !== "function") return null;
+  const sessionDir = manager.getSessionDir();
+  if (typeof sessionDir !== "string") return null;
+  const agentDir = ompSessionAgentDir(sessionDir);
+  if (!agentDir) return null;
   const original = manager.getHeader() ?? {};
   const sessionId = String(manager.getSessionId());
   const header = {
@@ -290,8 +302,7 @@ function contextData(ctx: any) {
     cwd: String(original.cwd ?? manager.getRecordedCwd?.() ?? ctx.cwd ?? ""),
     timestamp: original.timestamp ?? new Date().toISOString(),
   };
-  const sessionDir = manager.getSessionDir();
-  return { manager, sessionId: header.id, header, agentDir: ompSessionAgentDir(sessionDir) };
+  return { manager, sessionId: header.id, header, agentDir };
 }
 
 function enqueueSession(agentDir: string, sessionId: string, task: () => Promise<void>): Promise<void> {
@@ -305,17 +316,17 @@ function enqueueSession(agentDir: string, sessionId: string, task: () => Promise
 function ensureStartup(agentDir: string, config: ReturnType<typeof loadPiConfig>): Promise<void> {
   let pending = startupByAgentDir.get(agentDir);
   if (!pending) {
-    pending = reconcileAllSessions(agentDir, config).catch(() => {
+    pending = reconcileAllSessions(agentDir, config).catch((error) => {
       startupByAgentDir.delete(agentDir);
-      warnOnce(`startup:${agentDir}`, "Existing OMP session sync failed; the current OMP session will continue and retry on its next event or startup.");
+      warnOnce(`startup:${agentDir}`, `Existing OMP session sync failed (${errorDetail(error)}); the current OMP session will continue and retry on its next event or startup.`);
     });
     startupByAgentDir.set(agentDir, pending);
   }
   return pending;
 }
 
-async function initializeSession(ctx: any, config: ReturnType<typeof loadPiConfig>): Promise<void> {
-  const { manager, sessionId, header, agentDir } = contextData(ctx);
+async function initializeSession(data: SessionContext, config: ReturnType<typeof loadPiConfig>): Promise<void> {
+  const { manager, sessionId, header, agentDir } = data;
   await ensureStartup(agentDir, config);
   const state = await getBridgeState(agentDir);
   const target = targetForSession(header, config);
@@ -346,8 +357,8 @@ async function initializeSession(ctx: any, config: ReturnType<typeof loadPiConfi
   await saveBridgeState(agentDir, state);
 }
 
-async function syncManager(ctx: any, config: ReturnType<typeof loadPiConfig>): Promise<void> {
-  const { manager, sessionId, header, agentDir } = contextData(ctx);
+async function syncManager(data: SessionContext, config: ReturnType<typeof loadPiConfig>): Promise<void> {
+  const { manager, sessionId, header, agentDir } = data;
   await ensureStartup(agentDir, config);
   const state = await getBridgeState(agentDir);
   const target = targetForSession(header, config);
@@ -408,21 +419,24 @@ export default function ompPiBridge(pi: any): void {
     }
   }
 
-  const withSession = (ctx: any, operation: (data: ReturnType<typeof contextData>) => Promise<void>) => {
+  const withSession = (ctx: any, operation: (data: SessionContext) => Promise<void>) => {
     const data = contextData(ctx);
+    if (!data) return Promise.resolve();
     return enqueueSession(data.agentDir, data.sessionId, async () => {
       await ensureStartup(data.agentDir, config);
       await operation(data);
-    }).catch(() => {
-      warnOnce(`write:${data.sessionId}`, "A Pi mirror write failed; OMP will keep running and retry on a later session event.");
+    }).catch((error) => {
+      warnOnce(`write:${data.sessionId}`, `A Pi mirror write failed (${errorDetail(error)}); OMP will keep running and retry on a later session event.`);
     });
   };
 
   pi.on("session_start", async (_event: unknown, ctx: any) => {
     registerProviders(pi, ctx, config.providers);
-    const { agentDir } = contextData(ctx);
+    const data = contextData(ctx);
+    if (!data) return;
+    const { agentDir } = data;
     void ensureStartup(agentDir, config);
-    await withSession(ctx, (data) => initializeSession(ctx, config));
+    await withSession(ctx, (activeData) => initializeSession(activeData, config));
   });
 
   pi.on("message_end", async (event: any, ctx: any) => {
@@ -444,7 +458,7 @@ export default function ompPiBridge(pi: any): void {
 
   for (const eventName of ["turn_start", "turn_end", "session_shutdown"]) {
     pi.on(eventName, async (_event: unknown, ctx: any) => {
-      await withSession(ctx, () => syncManager(ctx, config));
+      await withSession(ctx, (data) => syncManager(data, config));
     });
   }
 }

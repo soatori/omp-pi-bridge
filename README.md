@@ -1,89 +1,91 @@
 # OMP Pi Bridge
 
-一个面向 Oh My Pi（OMP）的扩展：从 Pi 配置读取供应商和模型，并将 OMP 的 Token 用量与会话记录写成 Pi 兼容的会话文件，供 CC Switch 原有的 Pi 扫描读取。
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-**本项目是 OMP 扩展，不是 Pi 扩展。** `package.json` 只声明 OMP 的 `omp.extensions`，不声明 `pi.extensions`。Pi 在这里是配置来源和会话文件格式。不要把扩展复制到 Pi 的 `~/.pi/agent/extensions`，否则它可能尝试镜像 Pi 自己的会话。参考 [OMP 扩展规范](https://github.com/can1357/oh-my-pi/blob/main/docs/skills/authoring-extensions.md) 和 [Pi 扩展规范](https://pi.dev/docs/latest/extensions)。
+An Oh My Pi (OMP) extension that reads providers and models from Pi configuration, then writes OMP token usage and session records as Pi-compatible session files for CC Switch’s existing Pi scanner.
 
-## 功能与数据边界
+**This is an OMP extension, not a Pi extension.** `package.json` declares `omp.extensions` only; it does not declare `pi.extensions`. Pi is the configuration source and session-file format. Do not copy this extension into Pi’s `~/.pi/agent/extensions`: it could mirror Pi’s own sessions back into Pi. See the [OMP extension guide](https://github.com/can1357/oh-my-pi/blob/main/docs/skills/authoring-extensions.md) and the [Pi extension guide](https://pi.dev/docs/latest/extensions).
 
-- OMP 启动时读取 Pi 的 `models.json`，在 OMP 运行时注册供应商、API 类型、端点、密钥引用和模型。
-- 历史 OMP 会话只回填 Token 用量；历史提示词和回复内容不回填。
-- 实时 OMP 对话会镜像完整消息、工具结果和 Token 用量。实时记录包含工具输入和输出。
-- 插件不写 Pi 的 API 配置，也不读取或修改 CC Switch 的配置和数据库。
-- Pi 没有配置供应商时，首次会话启动会询问是否同步。选项默认是“本次跳过同步”；拒绝、取消或没有交互界面时，本次 OMP 进程不会回填或写 Pi 会话。选择同步后，该决定只在当前 OMP 进程有效。
+## Features and data boundaries
 
-## 安装
+- At startup, the extension reads Pi’s `models.json` and registers providers, API types, endpoints, key references, and models in the OMP runtime.
+- Historical OMP sessions backfill token usage only; historical prompts and replies are not copied.
+- Live OMP conversations mirror full messages, tool results, and token usage. Live records include tool inputs and outputs.
+- The extension does not write Pi API configuration or read or modify CC Switch configuration or databases.
+- If Pi has no configured providers, the first session startup asks whether to sync. The default is to skip for this run. Declining, canceling, or running without an interactive prompt means the current OMP process will not backfill or write Pi sessions. Choosing to sync applies only to the current OMP process.
 
-### Windows 原生安装脚本
+## Installation
 
-在 PowerShell 中进入项目目录后运行：
+### Native Windows installer
+
+From the project directory, run this in PowerShell:
 
 ```powershell
 .\install.ps1
 ```
 
-脚本会把扩展复制到当前 OMP profile 的扩展目录，并在需要时把已存在的 Bun 可执行目录加入用户 `PATH`。脚本不会安装 OMP 或 Bun。安装后重新启动 OMP。
+The script copies the extension into the current OMP profile’s extension directory and, when needed, adds an existing Bun executable directory to the user `PATH`. It does not install OMP or Bun. Restart OMP after installation.
 
-命名 profile 可显式指定：
+To specify a named profile:
 
 ```powershell
 .\install.ps1 -Profile work
 ```
 
-也可先设置当前 PowerShell 的 profile 环境变量：
+You can also set the profile for the current PowerShell session first:
 
 ```powershell
-$env:OMP_PROFILE = "work"
+$env:OMP_PROFILE = 'work'
 .\install.ps1
 ```
 
-### OMP 插件管理器
+### OMP plugin manager
 
-也可以通过 OMP 插件管理器从 GitHub 安装：
+You can also install it from GitHub with the OMP plugin manager:
 
 ```powershell
 omp plugin install github:soatori/omp-pi-bridge
 ```
 
-请选择一种安装方式，避免同时加载两份扩展。
+Use one installation method to avoid loading the extension twice.
 
-## 配置
+## Configuration
 
-默认读取 `%USERPROFILE%\.pi\agent\models.json`。Pi 配置目录不同时，设置 `OMP_PI_CONFIG_DIR`：
+By default, the extension reads `%USERPROFILE%\.pi\agent\models.json`. If your Pi configuration directory is elsewhere, set `OMP_PI_CONFIG_DIR`:
 
 ```powershell
-$env:OMP_PI_CONFIG_DIR = "D:\Pi\agent"
+$env:OMP_PI_CONFIG_DIR = 'D:\Pi\agent'
 ```
 
-`PI_CODING_AGENT_DIR` 用于 OMP 自己的 agent 目录，不用于指定 Pi 配置目录。
+`PI_CODING_AGENT_DIR` configures OMP’s own agent directory; it does not select the Pi configuration directory.
 
-Pi 的 `settings.json` 中 `sessionDir` 或 `PI_CODING_AGENT_SESSION_DIR` 可以指定绝对会话目录。相对路径无法供 CC Switch 全局扫描，插件会跳过并提示。
+Pi’s `settings.json` `sessionDir` setting or `PI_CODING_AGENT_SESSION_DIR` can specify an absolute session directory. Relative paths cannot be scanned globally by CC Switch, so the extension skips them and displays a notice.
 
-## 卸载
+## Uninstallation
 
-通过原生脚本安装的扩展：
+To remove an extension installed with the native script:
 
 ```powershell
 .\uninstall.ps1
 ```
 
-卸载命名 profile：
+To remove it from a named profile:
 
 ```powershell
 .\uninstall.ps1 -Profile work
 ```
 
-通过 OMP 插件管理器安装的扩展：
+To remove it through the OMP plugin manager:
 
 ```powershell
 omp plugin uninstall omp-pi-bridge
 ```
 
-`uninstall.ps1` 只删除当前 profile 下的 `omp-pi-bridge` 扩展目录，保留 Pi 会话历史、OMP 同步状态、配置文件和共享 `PATH` 项。卸载后重新启动 OMP。
+`uninstall.ps1` removes only the `omp-pi-bridge` extension directory from the selected profile. It preserves Pi session history, OMP sync state, configuration files, and shared `PATH` entries. Restart OMP after uninstalling.
 
-## 开发与验证
+## Development and verification
 
-需要 Bun 和 Windows PowerShell：
+Bun and Windows PowerShell are required:
 
 ```powershell
 bun test test
@@ -92,11 +94,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/install-profile.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File test/uninstall-profile.ps1
 ```
 
-测试覆盖供应商同步、空配置确认、历史与实时会话转换、profile 路径、卸载保留边界和并发状态写入。
+Tests cover provider sync, confirmation for an empty Pi configuration, historical and live session conversion, profile paths, uninstall preservation, and concurrent state writes.
 
-## 兼容性与行为
+## Compatibility and behavior
 
-- 已在 OMP 18.10.3、CC Switch 4.0.7、Windows 上验证。
-- OMP 分支在 Pi 镜像中按执行顺序展平；恢复工作请使用原 OMP 会话。
-- 实时完整会话可能显示在 Pi 或 CC Switch 的会话列表中。
-- 成本显示取决于 OMP 用量数据及 CC Switch 可用的模型定价。
+- Verified with OMP 18.10.3 and CC Switch 4.0.7 on Windows.
+- OMP branches are flattened in execution order in the Pi mirror. Resume work from the original OMP session.
+- Full live sessions may appear in the Pi or CC Switch session list.
+- Cost display depends on OMP usage data and model pricing available to CC Switch.

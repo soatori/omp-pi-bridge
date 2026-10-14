@@ -5,6 +5,7 @@ import {
   normalizePiApiKey,
   ompSessionAgentDir,
   parseOmpSession,
+  piProviderAgentDir,
   toPiLiveEntry,
   toPiUsageEntries,
 } from "../src/bridge.ts";
@@ -28,6 +29,13 @@ test("Pi API key syntax maps to OMP env and command syntax", () => {
   expect(normalizePiApiKey("${PI_TOKEN}")).toBe("PI_TOKEN");
   expect(normalizePiApiKey("!powershell -NoProfile -Command 'Write-Output key'")).toBe("!powershell -NoProfile -Command 'Write-Output key'");
   expect(normalizePiApiKey("literal-key")).toBe("literal-key");
+});
+
+test("Pi config directory does not reuse OMP's PI_CODING_AGENT_DIR", () => {
+  expect(piProviderAgentDir({ PI_CODING_AGENT_DIR: "C:\\Users\\cbsjz\\.omp\\agent" }, "C:\\Users\\cbsjz"))
+    .toBe("C:\\Users\\cbsjz\\.pi\\agent");
+  expect(piProviderAgentDir({ OMP_PI_CONFIG_DIR: "D:\\Pi\\agent" }, "C:\\Users\\cbsjz"))
+    .toBe("D:\\Pi\\agent");
 });
 
 test("live conversation entries retain message content and usage", () => {
@@ -85,5 +93,6 @@ test("Pi session files use project folders and honor an absolute custom sessionD
 
 test("only OMP project session directories are mapped to an agent state directory", () => {
   expect(ompSessionAgentDir("C:\\Users\\cbsjz\\.omp\\agent\\sessions\\--C--work--")).toBe("C:\\Users\\cbsjz\\.omp\\agent");
+  expect(ompSessionAgentDir("C:\\Users\\cbsjz\\.pi\\agent\\sessions\\--C--work--")).toBeNull();
   expect(ompSessionAgentDir("E:\\Develop\\omp-pi-bridge")).toBeNull();
 });

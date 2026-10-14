@@ -1,7 +1,15 @@
+param(
+    [AllowNull()]
+    [Alias("Profile")]
+    [string]$OmpProfile = $env:OMP_PROFILE
+)
+
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "scripts\omp-profile-path.ps1")
+
 $sourceDir = Join-Path $PSScriptRoot "src"
-$agentDir = Join-Path $env:USERPROFILE ".omp\agent"
+$agentDir = Get-OmpAgentDir -BaseDirectory $env:USERPROFILE -ProfileName $OmpProfile
 $extensionDir = Join-Path $agentDir "extensions\omp-pi-bridge"
 
 if (-not (Test-Path (Join-Path $sourceDir "index.ts"))) {

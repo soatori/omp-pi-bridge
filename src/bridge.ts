@@ -325,7 +325,7 @@ export function makePiSessionHeader(source: Dict): Dict {
 }
 
 export function piProviderAgentDir(env: Dict = process.env, home = process.env.USERPROFILE || process.env.HOME || "") {
-  const custom = env.PI_CODING_AGENT_DIR;
+  const custom = env.OMP_PI_CONFIG_DIR;
   if (typeof custom === "string" && custom.trim()) return pathApi(custom).resolve(custom);
   return path.join(home, ".pi", "agent");
 }
@@ -335,5 +335,7 @@ export function ompSessionAgentDir(sessionDir: string): string | null {
   const projectSessionDir = api.resolve(sessionDir);
   const sessionsRoot = api.dirname(projectSessionDir);
   if (api.basename(sessionsRoot).toLowerCase() !== "sessions") return null;
-  return api.dirname(sessionsRoot);
+  const agentDir = api.dirname(sessionsRoot);
+  if (api.basename(api.dirname(agentDir)).toLowerCase() === ".pi") return null;
+  return agentDir;
 }

@@ -1,8 +1,16 @@
 {
   "name": "omp-pi-bridge",
   "version": "0.1.0",
+  "description": "Oh My Pi extension that mirrors OMP usage into Pi-compatible sessions for CC Switch.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/soatori/omp-pi-bridge.git"
+  },
   "private": true,
   "type": "module",
+  "omp": {
+    "extensions": ["./src/index.ts"]
+  },
   "scripts": {
     "test": "bun test test",
     "build-check": "bun build src/index.ts --target=bun --outdir temp/build-check"

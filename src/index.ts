@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import {
   getPiSessionPath,
@@ -35,6 +36,8 @@ const startupByAgentDir = new Map<string, Promise<void>>();
 const stateByAgentDir = new Map<string, BridgeState>();
 const seenBySession = new Map<string, { ids: Set<string>; lastId: string | null; needsSeparator: boolean }>();
 const sessionQueues = new Map<string, Promise<void>>();
+const stateSaveQueues = new Map<string, Promise<void>>();
+const sessionSyncConsentByAgentDir = new Map<string, Promise<boolean>>();
 const warned = new Set<string>();
 
 function warnOnce(key: string, message: string): void {
@@ -104,23 +107,119 @@ async function getBridgeState(agentDir: string): Promise<BridgeState> {
   return state;
 }
 
-async function saveBridgeState(agentDir: string, state: BridgeState): Promise<void> {
-  await fs.mkdir(agentDir, { recursive: true });
-  const file = path.join(agentDir, "omp-pi-bridge-state.json");
-  const temporary = `${file}.${process.pid}.tmp`;
-  await fs.writeFile(temporary, JSON.stringify(state), "utf8");
-  await fs.rename(temporary, file);
+async function acquireBridgeStateLock(agentDir: string): Promise<() => Promise<void>> {
+  const lockFile = path.join(agentDir, "omp-pi-bridge-state.lock");
+  const deadline = Date.now() + 10_000;
+  while (true) {
+    const token = randomUUID();
+    try {
+      const handle = await fs.open(lockFile, "wx");
+      try {
+        await handle.writeFile(JSON.stringify({ pid: process.pid, token }), "utf8");
+      } catch (writeError) {
+        await handle.close();
+        await fs.rm(lockFile, { force: true }).catch(() => {});
+        throw writeError;
+      }
+      await handle.close();
+      return async () => {
+        try {
+          const owner = JSON.parse(await fs.readFile(lockFile, "utf8"));
+          if (owner.token === token) await fs.rm(lockFile, { force: true });
+        } catch {
+          // A stale-lock recovery may already have removed this lock.
+        }
+      };
+    } catch (error: any) {
+      if (error?.code !== "EEXIST") throw error;
+      let stale = false;
+      let observedToken: string | undefined;
+      try {
+        const owner = JSON.parse(await fs.readFile(lockFile, "utf8"));
+        observedToken = owner.token;
+        const age = Date.now() - (await fs.stat(lockFile)).mtimeMs;
+        try {
+          process.kill(Number(owner.pid), 0);
+          stale = age > 120_000;
+        } catch (processError: any) {
+          stale = processError?.code === "ESRCH" || age > 120_000;
+        }
+      } catch {
+        try {
+          stale = Date.now() - (await fs.stat(lockFile)).mtimeMs > 5_000;
+        } catch {
+          continue;
+        }
+      }
+      if (stale) {
+        try {
+          if (observedToken !== undefined) {
+            const owner = JSON.parse(await fs.readFile(lockFile, "utf8"));
+            if (owner.token !== observedToken) continue;
+          }
+          const staleFile = `${lockFile}.${randomUUID()}.stale`;
+          await fs.rename(lockFile, staleFile);
+          await fs.rm(staleFile, { force: true });
+          continue;
+        } catch (staleError: any) {
+          if (staleError?.code === "ENOENT") continue;
+          throw staleError;
+        }
+      }
+      if (Date.now() >= deadline) throw new Error("Timed out waiting for the OMP Pi bridge state lock.");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
 }
 
-async function walkJsonl(root: string): Promise<string[]> {
+async function mergeSavedState(agentDir: string, state: BridgeState): Promise<void> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(path.join(agentDir, "omp-pi-bridge-state.json"), "utf8"));
+    if (parsed?.version !== 1 || !parsed.sessions || typeof parsed.sessions !== "object") return;
+    state.backfillDone ||= parsed.backfillDone === true;
+    for (const [sessionId, saved] of Object.entries(parsed.sessions) as Array<[string, SavedSession]>) {
+      if (!saved || !Number.isFinite(saved.cursor)) continue;
+      const current = state.sessions[sessionId];
+      if (!current || saved.cursor > current.cursor || (saved.cursor === current.cursor && (saved.sourceMtimeMs ?? 0) > (current.sourceMtimeMs ?? 0))) {
+        state.sessions[sessionId] = saved;
+      }
+    }
+  } catch {
+    // A missing or damaged state file is recovered by stable IDs in Pi sessions.
+  }
+}
+
+async function saveBridgeState(agentDir: string, state: BridgeState): Promise<void> {
+  const previous = stateSaveQueues.get(agentDir) ?? Promise.resolve();
+  const current = previous.then(async () => {
+    await fs.mkdir(agentDir, { recursive: true });
+    const release = await acquireBridgeStateLock(agentDir);
+    const file = path.join(agentDir, "omp-pi-bridge-state.json");
+    const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      await mergeSavedState(agentDir, state);
+      await fs.writeFile(temporary, JSON.stringify(state), "utf8");
+      await fs.rename(temporary, file);
+    } finally {
+      await fs.rm(temporary, { force: true }).catch(() => {});
+      await release();
+    }
+  });
+  stateSaveQueues.set(agentDir, current.catch(() => {}));
+  await current;
+}
+
+async function walkJsonl(root: string): Promise<{ files: string[]; complete: boolean }> {
   const result: string[] = [];
   const pending = [root];
+  let complete = true;
   while (pending.length) {
     const current = pending.pop()!;
     let entries;
     try {
       entries = await fs.readdir(current, { withFileTypes: true });
-    } catch {
+    } catch (error: any) {
+      if (current !== root || error?.code !== "ENOENT") complete = false;
       continue;
     }
     for (const entry of entries) {
@@ -129,7 +228,7 @@ async function walkJsonl(root: string): Promise<string[]> {
       else if (entry.isFile() && entry.name.toLowerCase().endsWith(".jsonl")) result.push(fullPath);
     }
   }
-  return result;
+  return { files: result, complete };
 }
 
 async function readTargetIndex(file: string): Promise<{ ids: Set<string>; lastId: string | null; needsSeparator: boolean }> {
@@ -234,7 +333,9 @@ async function statSource(file: string | undefined): Promise<{ size?: number; mt
 async function reconcileAllSessions(agentDir: string, config: ReturnType<typeof loadPiConfig>): Promise<void> {
   const state = await getBridgeState(agentDir);
   const root = path.join(agentDir, "sessions");
-  const files = await walkJsonl(root);
+  const scan = await walkJsonl(root);
+  let backfillComplete = scan.complete;
+  const files = scan.files;
   for (const sourceFile of files) {
     const info = await statSource(sourceFile);
     const prior = Object.values(state.sessions).find((session) => session.sourceFile === sourceFile);
@@ -243,14 +344,19 @@ async function reconcileAllSessions(agentDir: string, config: ReturnType<typeof 
     try {
       contents = await fs.readFile(sourceFile, "utf8");
     } catch {
+      backfillComplete = false;
       continue;
     }
     const parsed = parseOmpSession(contents);
     const header = parsed.header;
-    if (!header || typeof header.id !== "string" || typeof header.cwd !== "string") continue;
+    if (!header || typeof header.id !== "string" || typeof header.cwd !== "string") {
+      backfillComplete = false;
+      continue;
+    }
     const target = targetForSession(header, config);
     if (!target) {
       warnOnce("relative-session-dir", "Pi uses a relative sessionDir, which CC Switch cannot scan globally; session mirroring is skipped.");
+      backfillComplete = false;
       continue;
     }
     const saved = state.sessions[header.id] ?? {
@@ -265,7 +371,7 @@ async function reconcileAllSessions(agentDir: string, config: ReturnType<typeof 
     }
     const seen = await getSeen(agentDir, header.id, target.filePath, saved);
     const cursor = Math.min(saved.cursor, parsed.entries.length);
-    const historical = !state.backfillDone && saved.cursor === 0;
+    const historical = saved.cursor === 0 && (!state.backfillDone || !prior);
     for (let index = cursor; index < parsed.entries.length; index++) {
       const source = parsed.entries[index];
       const mapped = historical
@@ -281,7 +387,7 @@ async function reconcileAllSessions(agentDir: string, config: ReturnType<typeof 
     state.sessions[header.id] = saved;
     await saveBridgeState(agentDir, state);
   }
-  if (!state.backfillDone) {
+  if (!state.backfillDone && backfillComplete) {
     state.backfillDone = true;
     await saveBridgeState(agentDir, state);
   }
@@ -325,6 +431,29 @@ function ensureStartup(agentDir: string, config: ReturnType<typeof loadPiConfig>
   return pending;
 }
 
+function allowPiSessionSync(ctx: any, data: SessionContext, config: ReturnType<typeof loadPiConfig>): Promise<boolean> {
+  if (config.providers.length) return Promise.resolve(true);
+  const existing = sessionSyncConsentByAgentDir.get(data.agentDir);
+  if (existing) return existing;
+  if (ctx?.hasUI !== true || typeof ctx.ui?.select !== "function") {
+    warnOnce(`empty-pi-config-no-ui:${data.agentDir}`, "Pi has no configured providers and this OMP session has no confirmation UI; Pi session mirroring is skipped.");
+    return Promise.resolve(false);
+  }
+
+  const pending = Promise.resolve()
+    .then(() => ctx.ui.select(
+      "Pi 配置为空：要把 OMP 对话和 Token 用量写入 Pi 会话文件吗？",
+      ["本次跳过同步", "同步完整对话与 Token 用量到 Pi"],
+    ))
+    .then((choice: unknown) => choice === "同步完整对话与 Token 用量到 Pi")
+    .catch((error) => {
+      warnOnce(`empty-pi-config-confirm:${data.agentDir}`, `Pi session mirroring was skipped because confirmation failed (${errorDetail(error)}).`);
+      return false;
+    });
+  sessionSyncConsentByAgentDir.set(data.agentDir, pending);
+  return pending;
+}
+
 async function initializeSession(data: SessionContext, config: ReturnType<typeof loadPiConfig>): Promise<void> {
   const { manager, sessionId, header, agentDir } = data;
   await ensureStartup(agentDir, config);
@@ -336,6 +465,7 @@ async function initializeSession(data: SessionContext, config: ReturnType<typeof
   });
   const entries = manager.getEntries();
   let saved = state.sessions[sessionId];
+  const historical = !saved;
   if (!saved) {
     saved = { cursor: 0, targetFile: target.filePath, lastTargetEntryId: seen.lastId };
     state.sessions[sessionId] = saved;
@@ -343,9 +473,9 @@ async function initializeSession(data: SessionContext, config: ReturnType<typeof
   if (saved.targetFile !== target.filePath) saved.targetFile = target.filePath;
   const index = Math.min(saved.cursor, entries.length);
   for (let i = index; i < entries.length; i++) {
-    const mapped = state.backfillDone
-      ? [toPiLiveEntry(entries[i], sessionId, seen.lastId)].filter(Boolean) as Dict[]
-      : toPiUsageEntries([entries[i]], sessionId);
+    const mapped = historical
+      ? toPiUsageEntries([entries[i]], sessionId)
+      : [toPiLiveEntry(entries[i], sessionId, seen.lastId)].filter(Boolean) as Dict[];
     await appendRecords(target, header, mapped, seen);
   }
   saved.cursor = entries.length;
@@ -364,6 +494,7 @@ async function syncManager(data: SessionContext, config: ReturnType<typeof loadP
   const target = targetForSession(header, config);
   if (!target) return;
   let saved = state.sessions[sessionId];
+  const historical = !saved;
   if (!saved) {
     saved = { cursor: 0, targetFile: target.filePath, lastTargetEntryId: null };
     state.sessions[sessionId] = saved;
@@ -376,9 +507,9 @@ async function syncManager(data: SessionContext, config: ReturnType<typeof loadP
   const entries = manager.getEntries();
   const cursor = Math.min(saved.cursor, entries.length);
   for (let i = cursor; i < entries.length; i++) {
-    const mapped = state.backfillDone
-      ? [toPiLiveEntry(entries[i], sessionId, seen.lastId)].filter(Boolean) as Dict[]
-      : toPiUsageEntries([entries[i]], sessionId);
+    const mapped = historical
+      ? toPiUsageEntries([entries[i]], sessionId)
+      : [toPiLiveEntry(entries[i], sessionId, seen.lastId)].filter(Boolean) as Dict[];
     await appendRecords(target, header, mapped, seen);
   }
   saved.cursor = entries.length;
@@ -423,6 +554,7 @@ export default function ompPiBridge(pi: any): void {
     const data = contextData(ctx);
     if (!data) return Promise.resolve();
     return enqueueSession(data.agentDir, data.sessionId, async () => {
+      if (!await allowPiSessionSync(ctx, data, config)) return;
       await ensureStartup(data.agentDir, config);
       await operation(data);
     }).catch((error) => {
@@ -434,8 +566,6 @@ export default function ompPiBridge(pi: any): void {
     registerProviders(pi, ctx, config.providers);
     const data = contextData(ctx);
     if (!data) return;
-    const { agentDir } = data;
-    void ensureStartup(agentDir, config);
     await withSession(ctx, (activeData) => initializeSession(activeData, config));
   });
 
